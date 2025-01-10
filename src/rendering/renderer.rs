@@ -1,8 +1,9 @@
 use gl::{self};
 use glutin::{window::Window, ContextWrapper, PossiblyCurrent};
 use itertools::Itertools;
+use core::str;
 use std::{fs::{create_dir, File}, io::{Read, Write}, path::absolute};
-use crate::{midi::midi_track_parser::Note, rendering::{buffers::*, shader::*}, set_attribute};
+use crate::{midi::midi_track_parser::{MetaEvent, MetaEventName, Note}, rendering::{buffers::*, shader::*}, set_attribute};
 
 // random color!!!
 use rand::prelude::*;
@@ -17,7 +18,7 @@ pub struct Vertex(TexCoord);
 
 // render note
 pub type NoteTimes = [f32; 2];
-pub type NoteColors = u32;
+pub type NoteColors = [f32; 3];
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -28,7 +29,8 @@ pub struct RenderNote(NoteTimes, NoteColors);
 #[derive(Clone, Copy)]
 pub struct RenderKey {
     color: u32,
-    meta: u32
+    meta: u32,
+    key_weight: f32,
 }
 
 impl RenderKey {
@@ -37,6 +39,10 @@ impl RenderKey {
         if pressed {
             self.meta = self.meta | 0b10;
         }
+    }
+
+    pub fn set_key_weight(&mut self, velocity: u8) {
+        self.key_weight = 1.0 - (velocity as f32) / 127.0;
     }
 
     pub fn mark_black(&mut self, black: bool) {
@@ -104,27 +110,38 @@ pub struct Renderer {
     pub note_color_index_table: Vec<usize>,
     pub time: f32,
     pub time_changed: bool,
-    last_note_starts: [usize; 128],
+    last_note_starts: [usize; 257],
 
     pub width: f32,
     pub height: f32,
 
-    black_keys: [bool; 128],
-    key_num: [usize; 128],
+    pub first_key: usize,
+    pub last_key: usize,
+    black_keys: [bool; 257],
+    key_num: [usize; 257],
     black_key_ids: Vec<usize>,
     white_key_ids: Vec<usize>,
-    render_keys: [RenderKey; 128],
-    x1array: [f32; 128],
-    wdtharray: [f32; 128],
+    render_keys: [RenderKey; 257],
+    x1array: [f32; 257],
+    wdtharray: [f32; 257],
 
     pub notes_passed: usize,
     pub note_count: usize,
     pub polyphony: usize,
-    first_unhit_note: [usize; 128],
+    first_unhit_note: [usize; 257],
+
+    // experimental thing
+    kb_key_velocities: [u8; 257],
 
     pub note_size: f32,
     pub bar_color: [f32; 3],
     pub background_color: [f32; 3],
+    pub notes_transpose: i32,
+
+    // meta events
+    pub meta_events: Vec<MetaEvent>,
+    pub meta_passed: usize,
+    pub curr_marker_text: String
 }
 
 impl Renderer {
@@ -220,15 +237,16 @@ impl Renderer {
         
         let note_instance_array = Buffer::new(gl::ARRAY_BUFFER);
         let notes_render = [RenderNote {
-            0:[0.0,1.0],
-            1:0
+            0:[0.0, 1.0],
+            1:[0.0, 0.0, 0.0]
         }; NOTE_BUFFER_SIZE];
         note_instance_array.set_data(notes_render.as_slice(), gl::DYNAMIC_DRAW);
 
-        let note_times_attrib = n_program.get_attrib_location("note_times").unwrap();
+        let note_times_attrib: u32 = n_program.get_attrib_location("note_times").unwrap();
         set_attribute!(gl::FLOAT, note_vertex_array, note_times_attrib, RenderNote::0);
         let note_colors_attrib = n_program.get_attrib_location("colors").unwrap();
-        set_attribute!(gl::UNSIGNED_INT, note_vertex_array, note_colors_attrib, RenderNote::1);
+        set_attribute!(gl::FLOAT, note_vertex_array, note_colors_attrib, RenderNote::1);
+        //note_vertex_array.set_attribute::<u32>(gl::UNSIGNED_INT, note_colors_attrib, 1, 0);
 
         gl::VertexAttribDivisor(1, 1);
         gl::VertexAttribDivisor(2, 1);
@@ -257,8 +275,9 @@ impl Renderer {
         let keyboard_instance_buffer = Buffer::new(gl::ARRAY_BUFFER);
         let mut render_keys = [RenderKey {
             color: 0,
-            meta: 0
-        }; 128];
+            meta: 0,
+            key_weight: 0.0,
+        }; 257];
         keyboard_instance_buffer.set_data(render_keys.as_slice(), gl::DYNAMIC_DRAW);
         
         // bar resources
@@ -276,20 +295,20 @@ impl Renderer {
 
         // keyboard stuffs idk
 
-        let mut black_keys: [bool; 128] = [false; 128];
-        for i in 0..128 {
+        let mut black_keys: [bool; 257] = [false; 257];
+        for i in 0..257 {
             let key_oct = i % 12;
             black_keys[i] = key_oct == 1 || key_oct == 3 || key_oct == 6 || key_oct == 8 || key_oct == 10;
         }
 
-        let mut key_num: [usize; 128] = [0; 128];
+        let mut key_num: [usize; 257] = [0; 257];
 
         let mut b: usize = 0;
         let mut w: usize = 0;
         let mut black: Vec<usize> = Vec::new();
         let mut white: Vec<usize> = Vec::new();
 
-        for i in 0..128 {
+        for i in 0..257 {
             if black_keys[i] {
                 key_num[i] = b;
                 b += 1;
@@ -303,7 +322,7 @@ impl Renderer {
 
         // keyboard stuff lol
         let first_note: isize = 0;
-        let last_note: isize = 127;
+        let last_note: isize = 256;
 
         let mut wdth: f32 = 0.0;
 
@@ -316,10 +335,10 @@ impl Renderer {
         if black_keys[(first_note) as usize] && first_note > 0 { knmfn = key_num[(first_note-1) as usize] as f32 + 0.5f32; }
         if black_keys[(last_note-1) as usize] { knmln = key_num[last_note as usize] as f32 - 0.5f32; }
 
-        let mut x1array = [0.0f32; 128];
-        let mut wdtharray = [0.0f32; 128];
+        let mut x1array = [0.0f32; 257];
+        let mut wdtharray = [0.0f32; 257];
 
-        for i in 0..128 {
+        for i in 0..257 {
             if !black_keys[i] {
                 x1array[i] = (key_num[i] as f32 - knmfn) / (knmln - knmfn + 1.0);
                 wdtharray[i] = 1.0 / (knmln - knmfn + 1.0);
@@ -385,12 +404,14 @@ impl Renderer {
             note_color_table,
             note_color_index_table: (0..16).collect_vec(),
             time: 0.0,
-            last_note_starts: [0; 128],
+            last_note_starts: [0; 257],
             time_changed: false,
 
             width,
             height,
 
+            first_key: 0,
+            last_key: 256,
             black_keys,
             key_num,
             black_key_ids: black,
@@ -399,14 +420,27 @@ impl Renderer {
             x1array,
             wdtharray,
 
+            kb_key_velocities: [0u8; 257],
+
             notes_passed: 0,
             note_count: 0,
             polyphony: 0,
             note_size: 0.25,
-            first_unhit_note: [0; 128],
+            first_unhit_note: [0; 257],
 
             bar_color: [1.0, 0.0, 0.0],
-            background_color: [0.5, 0.5, 0.5]
+            background_color: [0.5, 0.5, 0.5],
+            notes_transpose: 0,
+
+            curr_marker_text: String::new(),
+            meta_events: vec![
+                MetaEvent {
+                    time: 1.0,
+                    meta_name: MetaEventName::Marker,
+                    data: String::from("You should be able to see this if this works!").as_mut_vec().to_vec()
+                }
+            ],
+            meta_passed: 0
         }
     }
 
@@ -421,7 +455,35 @@ impl Renderer {
         self.note_color_index_table = (0..self.note_color_table.len()).collect_vec();
     }
 
+    pub fn refresh_render_notes(&mut self) -> () {
+        for key in 0..257 {
+            self.last_note_starts[key] = 0;
+            self.first_unhit_note[key] = 0;
+        }
+    }
+
+    fn update_meta_info(&mut self) -> () {
+        for meta in self.meta_events.iter() {
+            if meta.time > self.time { break; }
+            match meta.meta_name {
+                MetaEventName::Marker => {
+                    self.curr_marker_text = String::from_utf8_lossy(&meta.data).to_string();
+                },
+                _ => {
+
+                }
+            }
+        }
+    }
+
+    pub unsafe fn resize(&mut self, width: i32, height: i32) -> () {
+        gl::Viewport(0, 0, width, height);
+        self.width = width as f32;
+        self.height = height as f32;
+    }
+
     pub unsafe fn draw(&mut self, context: &ContextWrapper<PossiblyCurrent, Window>) -> () {
+        self.update_meta_info();
         gl::ClearColor(self.background_color[0], self.background_color[1], self.background_color[2], 1.0);
         gl::Clear(gl::COLOR_BUFFER_BIT);
 
@@ -429,20 +491,20 @@ impl Renderer {
         // test
         self.n_program.set_vec2("resolution", self.width, self.height);
 
-        let first_note: isize = 0;
-        let last_note: isize = 128;
+        let first_note: usize = self.first_key;
+        let last_note: usize = self.last_key + 1;
 
-        /*let mut kbfirstnote = first_note;
+        let mut kbfirstnote = first_note;
         let mut kblastnote = last_note;
         if self.black_keys[first_note as usize] { kbfirstnote -= 1; }
-        if self.black_keys[(last_note-1) as usize] { kblastnote += 1; }*/
+        if self.black_keys[(last_note-1) as usize] { kblastnote += 1; }
 
         let full_left = self.x1array[first_note as usize];
         let full_right = self.x1array[(last_note-1) as usize] + self.wdtharray[(last_note-1) as usize];
         let full_width = full_right - full_left;
 
         let mut kb_height = self.width / self.height / full_width;
-        kb_height *= 0.08;
+        kb_height *= 0.04;
 
         let mut ids: &mut Vec<usize>;
 
@@ -455,6 +517,12 @@ impl Renderer {
                 else { ids = &mut self.white_key_ids; }
 
                 for &key in ids.iter() {
+                    let mut skip_draw: bool = false;
+                    let mut real_key = 255 - (key as i32 - self.notes_transpose);
+                    if real_key < 0 || real_key > 255 {
+                        skip_draw = true;
+                    }
+                    //real_key = if real_key < 0 { 0 } else if real_key > 255 { 255 } else { real_key };
                     //gl::UseProgram(self.n_program.id);
                     //self.n_program.set_vec2("resolution", self.width, self.height);
                     //self.n_program.set_float("keyboard_height", kb_height);
@@ -465,9 +533,14 @@ impl Renderer {
                     let mut pressed = false;
                     let mut color = 0u32;
 
-                    let notes = &self.render_notes[127-key];
+                    let notes = if skip_draw {
+                        &Vec::new()
+                    } else {
+                        &self.render_notes[real_key as usize]
+                    };
 
                     let mut n_id = 0;
+                    let mut max_vel = 0u8;
 
                     let last_hit_note = self.first_unhit_note[key] - 1;
 
@@ -509,14 +582,22 @@ impl Renderer {
                                 self.polyphony += 1;
                                 color = self.note_color_table[(n.channel as usize * 16 + n.track) % self.note_color_table.len()];
                                 self.render_keys[key].color = color;
+                                if n.velocity > max_vel {
+                                    max_vel = n.velocity;
+                                }
+                                self.render_keys[key].set_key_weight(max_vel);
                             }
+                            if key < kbfirstnote || key > kblastnote - 1 { continue; }
+
                             if n.end as f32 / 1000000.0 < self.time { continue };
                             if n.start as f32 / 1000000.0 > self.time + scale { continue };
+
+                            let note_color = self.note_color_table[(n.channel as usize * 16 + n.track) % self.note_color_table.len()];
 
                             self.notes_render[n_id] = RenderNote {
                                 0: [(n.start as f32 / 1000000.0 - self.time) / scale,
                                 (n.end as f32 / 1000000.0 - self.time) / scale],
-                                1: self.note_color_table[(n.channel as usize * 16 + n.track) % self.note_color_table.len()]
+                                1: [(note_color & 0xFF) as f32 / 255.0, ((note_color >> 8) & 0xFF) as f32 / 255.0, ((note_color >> 16) & 0xFF) as f32 / 255.0]
                             };
                             n_id += 1;
                             //self.notes_passed += 1;
@@ -577,9 +658,10 @@ impl Renderer {
                 }
             }
         } else {
-            for key in 0..128 {
+            for key in kbfirstnote..kblastnote {
                 self.render_keys[key].mark_pressed(false);
                 self.render_keys[key].color = 0x000000;
+                self.render_keys[key].set_key_weight(0);
             }
         }
 
@@ -597,6 +679,7 @@ impl Renderer {
             else { ids = &mut self.white_key_ids; }
 
             for &key in ids.iter() {
+                if key < kbfirstnote || key > kblastnote - 1 { continue; }
                 self.k_program.set_float("keyboard_height", kb_height);
                 //self.k_vertex_buffer.bind();
                 //self.k_index_buffer.bind();
@@ -610,6 +693,7 @@ impl Renderer {
                 self.k_program.set_float("right", right);
                 self.k_program.set_uint("meta", self.render_keys[key].meta);
                 self.k_program.set_uint("color", self.render_keys[key].color);
+                self.k_program.set_float("key_weight", self.render_keys[key].key_weight);
                 gl::DrawElementsInstanced(gl::TRIANGLES, 6, gl::UNSIGNED_INT, std::ptr::null(), 1);
             }
 
@@ -651,7 +735,7 @@ fn verify_shader_integrity() -> () {
         "./shaders/b_fragment.glsl"
     ];
     // check if all shaders exist, first
-    let mut needs_recreations = if recreate_all {
+    let needs_recreations = if recreate_all {
         let len = file_paths.len();
         vec![true; len]
     } else {
@@ -665,7 +749,7 @@ String::from(
 
 layout (location = 0) in vec2 texcoord;
 layout (location = 1) in vec2 note_times;
-layout (location = 2) in uint colors;
+layout (location = 2) in vec3 colors;
 
 uniform float left;
 uniform float right;
@@ -682,37 +766,38 @@ void main() {
     float right = right * 2.0 - 1.0;
     float start = note_times.x * 2.0 - 1.0;
     float end = note_times.y * 2.0 - 1.0;
-    uint clr = colors;
-    vec3 color = vec3(uvec3((clr & uint(0xFF)), (clr >> 8) & uint(0xFF), (clr >> 16) & uint(0xFF))) / 256.0;
+    //vec3 color = vec3(uvec3((clr & uint(0xFF)), (clr >> 8) & uint(0xFF), (clr >> 16) & uint(0xFF))) / 256.0;
+    vec3 color = vec3(colors);
     vec3 bdr = color * 0.3;
     v_texcoord = texcoord;
     note_size = vec2(abs((right * 0.5 + 0.5) - (left * 0.5 + 0.5)), abs((end * 0.5 + 0.5) - (start * 0.5 + 0.5)));
 
+    // n_type 0 = note border | n_type 1 = note color itself
     int n_type = gl_VertexID / 4;
-    if (n_type == 0 || (n_type == 1 && note_size.y > 6.0 / resolution.y)) {
+    if (n_type == 0 || (n_type == 1 && note_size.y > 8.0 / resolution.y)) {
         if (int(gl_VertexID % 4) == 0) {
             gl_Position = vec4(left, start, 0.0, 1.0);
-            n_color = color + 0.2;
+            n_color = color;
             if (n_type == 1) {
-                gl_Position.xy += vec2(3.0 / resolution.x, 3.0 / resolution.y);
+                gl_Position.xy += vec2(2.0 / resolution.x, 4.0 / resolution.y);
             }
         } else if (int(gl_VertexID % 4) == 1) {
             gl_Position = vec4(right, start, 0.0, 1.0);
-            n_color = color;
+            n_color = color * 0.7;
             if (n_type == 1) {
-                gl_Position.xy += vec2(-3.0 / resolution.x, 3.0 / resolution.y);
+                gl_Position.xy += vec2(-2.0 / resolution.x, 4.0 / resolution.y);
             }
         } else if (int(gl_VertexID % 4) == 2) {
             gl_Position = vec4(right, end, 0.0, 1.0);
-            n_color = color;
+            n_color = color * 0.7;
             if (n_type == 1) {
-                gl_Position.xy += vec2(-3.0 / resolution.x, -3.0 / resolution.y);
+                gl_Position.xy += vec2(-2.0 / resolution.x, -4.0 / resolution.y);
             }
         } else if (int(gl_VertexID % 4) == 3 ) {
             gl_Position = vec4(left, end, 0.0, 1.0);
-            n_color = color + 0.2;
+            n_color = color;
             if (n_type == 1) {
-                gl_Position.xy += vec2(3.0 / resolution.x, -3.0 / resolution.y);
+                gl_Position.xy += vec2(2.0 / resolution.x, -4.0 / resolution.y);
             }
         }
     }
@@ -747,8 +832,6 @@ void main() {
 String::from(
 "#version 330
 
-layout (location = 0) in vec2 texcoord;
-
 uniform float left;
 uniform float right;
 uniform float keyboard_height;
@@ -756,8 +839,10 @@ uniform vec2 resolution;
 
 uniform uint color;
 uniform uint meta;
+uniform float key_weight;
 
 out vec3 k_color;
+out float k_weight;
 out vec2 v_texcoord;
 out float k_pressed;
 out float k_black;
@@ -776,16 +861,20 @@ void main() {
 
     k_pressed = pressed ? 1.0 : 0.0;
     k_black = black ? 1.0 : 0.0;
-    v_texcoord = texcoord;
+    k_weight = key_weight;
 
     if (int(gl_VertexID % 4) == 0) {
         gl_Position = vec4(left, -1.0, 0.0, 1.0);
+        v_texcoord = vec2(0.0, 0.0);
     } else if (int(gl_VertexID % 4) == 1) {
         gl_Position = vec4(right, -1.0, 0.0, 1.0);
+        v_texcoord = vec2(1.0, 0.0);
     } else if (int(gl_VertexID % 4) == 2) {
         gl_Position = vec4(right, keyboard_height * 2.0 - 1.0, 0.0, 1.0);
+        v_texcoord = vec2(1.0, 1.0);
     } else {
         gl_Position = vec4(left, keyboard_height * 2.0 - 1.0, 0.0, 1.0);
+        v_texcoord = vec2(0.0, 1.0);
     }
 
     if (black && (gl_VertexID == 0 || gl_VertexID == 1)) {
@@ -809,6 +898,7 @@ String::from(
 out vec4 key_color;
 
 in vec3 k_color;
+in float k_weight;
 in vec2 v_texcoord;
 in float k_pressed;
 in float k_black;
@@ -816,14 +906,16 @@ in float k_black;
 void main() {
     key_color = vec4(k_color, 1.0);
     if (k_black < 0.5) {
-        if (v_texcoord.y < 0.05 && k_pressed < 0.5) {
+        float shade_area = (k_pressed > 0.5) ? 0.05 * k_weight : 0.05;
+        if (v_texcoord.y < shade_area) {
             key_color *= 0.5;
         }
-        if (v_texcoord.x < 0.05 || v_texcoord.x > 0.95) {
+        if (v_texcoord.x < 0.03 || v_texcoord.x > 0.97) {
             key_color *= 0.3;
         }
     } else {
-        if (v_texcoord.y < 0.1 || v_texcoord.x < 0.07 || v_texcoord.x > 0.93) {
+        float shade_area = (k_pressed > 0.5) ? 0.03 * k_weight + 0.07 : 0.1;
+        if (v_texcoord.y < shade_area || v_texcoord.x < 0.07 || v_texcoord.x > 0.93) {
             key_color += 0.2;
         }
     }
@@ -831,8 +923,6 @@ void main() {
 // b_vertex.glsl
 String::from(
 "#version 330
-
-layout (location = 0) in vec2 texcoord;
 
 uniform float keyboard_height;
 uniform vec3 color;
@@ -843,16 +933,19 @@ out vec2 b_texcoord;
 void main() {
     vec2 pos;
     if (gl_VertexID % 4 == 0) {
-       pos = vec2(0.0, keyboard_height);
+        pos = vec2(0.0, keyboard_height);
+        b_texcoord = vec2(0.0, 0.0);
     } else if (gl_VertexID % 4 == 1) {
         pos = vec2(1.0, keyboard_height);
+        b_texcoord = vec2(1.0, 0.0);
     } else if (gl_VertexID % 4 == 2) {
         pos = vec2(1.0, keyboard_height * 1.05);
+        b_texcoord = vec2(1.0, 1.0);
     } else {
         pos = vec2(0.0, keyboard_height * 1.05);
+        b_texcoord = vec2(0.0, 1.0);
     }
     b_color = color;
-    b_texcoord = texcoord;
     gl_Position = vec4(pos * 2.0 - 1.0, 0.0, 1.0);
 }"),
 // b_fragment.glsl

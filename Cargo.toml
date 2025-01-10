@@ -19,6 +19,9 @@ gl = "0.14.0"
 "image" = "0.25.5"
 "rfd" = "0.15.1"
 "configparser" = "3.1.0"
+display-info = "0.5.2"
+num_cpus = "1.0"
+open = "3"
 
 [rust]
 debug = true

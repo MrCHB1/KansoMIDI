@@ -1,5 +1,4 @@
-use configparser::ini::Ini;
-use std::fs::File;
+use std::path::absolute;
 use std::ops::Index;
 
 use super::config::*;
@@ -12,18 +11,22 @@ pub struct AudioSettings {
 
     pub limiter_attack: f32,
     pub limiter_release: f32,
+
+    pub misc_transpose: i32,
 }
 
 impl AudioSettings {
     pub fn new() -> Self {
         Self {
-            layer_count: 4,
+            layer_count: 5,
             soundfont_paths: Vec::new(),
             active_soundfonts: Vec::new(),
             audio_fps: 0.0,
 
             limiter_attack: 0.01,
-            limiter_release: 1.0
+            limiter_release: 1.0,
+
+            misc_transpose: 0
         }
     }
 
@@ -37,9 +40,12 @@ impl AudioSettings {
                     Some(self.soundfont_paths.index(i).to_string()));
             }
             config.set("audio", "audio_fps", Some(self.audio_fps.to_string()));
+            config.set("audio", "limiter_attack", Some(self.limiter_attack.to_string()));
+            config.set("audio", "limiter_release", Some(self.limiter_release.to_string()));
             println!("No audio settings found, default values loaded.");
         } else {
-            self.layer_count = config.getint("audio", "layer_count").unwrap().unwrap() as i32;
+            self.layer_count = config.getint("audio", "layer_count").unwrap()
+                .unwrap_or(5) as i32;
             let mut i = 0;
             loop {
                 if let Some(sf) = 
@@ -51,7 +57,12 @@ impl AudioSettings {
                 }
                 i += 1;
             }
-            self.audio_fps = config.getfloat("audio", "audio_fps").unwrap().unwrap() as f32;
+            self.audio_fps = config.getfloat("audio", "audio_fps").unwrap()
+                .unwrap_or(0.0) as f32;
+            self.limiter_attack = config.getfloat("audio", "limiter_attack").unwrap()
+                .unwrap_or(0.01) as f32;
+            self.limiter_release = config.getfloat("audio", "limiter_release").unwrap()
+                .unwrap_or(1.0) as f32;
         }
     }
 
@@ -64,6 +75,8 @@ impl AudioSettings {
                 Some(self.soundfont_paths.index(i).to_string()));
         }
         config.set("audio", "audio_fps", Some(self.audio_fps.to_string()));
-        config.write(std::path::absolute("./config.ini").unwrap()).unwrap();
+        config.set("audio", "limiter_attack", Some(self.limiter_attack.to_string()));
+        config.set("audio", "limiter_release", Some(self.limiter_release.to_string()));
+        config.write(absolute("./config.ini").unwrap()).unwrap();
     }
 }

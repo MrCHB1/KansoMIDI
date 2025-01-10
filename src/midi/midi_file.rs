@@ -40,54 +40,41 @@ impl MIDIFile {
             tempo_evs: Vec::new()
         };
 
+        let mut track_count: u16 = 0;
+
         {
             let mut fs = file_stream.lock().unwrap();
             s.parse_header(&mut fs).unwrap();
             s.populate_track_locations(&mut fs).unwrap();
         }
-        
-        let s_box = Box::new(&mut s);
 
-        s_box.tracks = Vec::with_capacity(s_box.trk_count as usize);
-
-        for i in 0usize..(s_box.trk_count as usize) {
-            s_box.tracks.push(MIDITrack::new(i, s_box.ppq, Arc::clone(&file_stream), &s_box.track_locations[i]).unwrap());
+        track_count = s.trk_count;
+        for i in 0usize..(track_count as usize) {
+            s.tracks.push(MIDITrack::new(i, s.ppq, Arc::clone(&file_stream), &s.track_locations[i]).unwrap());
         }
 
-        let tempo_evs_seq: Vec<Vec<TempoEvent>>;
         println!("----- Parse pass 1 -----");
-        {
-            (s_box.note_counts, tempo_evs_seq) = s_box.tracks.par_iter_mut().enumerate().map(|(i, track)| {
-                while !track.ended {
-                    track.parse_ev().unwrap();
-                }
-                println!("track {} of {} parsed", i, &s_box.trk_count);
-                track.prep_for_pass_two().unwrap();
-                (track.note_count, std::mem::take(&mut track.tempo_evs))
-            }).collect();
-        }
+        let tempo_evs_seq: Vec<Vec<TempoEvent>>;
 
-        s_box.tempo_evs = merge_tempo_evs(tempo_evs_seq);
+        (s.note_counts, tempo_evs_seq) = s.tracks.par_iter_mut().enumerate().map(|(i, track)| {
+            while !track.ended {
+                track.parse_ev().unwrap();
+            }
+            println!("track {} of {} parsed", i, track_count);
+            track.prep_for_pass_two().unwrap();
+            (track.note_count, std::mem::take(&mut track.tempo_evs))
+        }).collect();
 
-        // merge tempo events lol
-        //let t_evs: Vec<TempoEvent> = merge_tempo_evs(tempo_evs_seq);
-
-        /*println!("----- Parse pass 2 -----");
-        {
-            s_box.midi_evs = merge_midi_events(s_box.tracks.par_iter_mut().enumerate().map(|(i, track)| {
-                while !track.ended {
-                    track.parse_pass_two(&t_evs).unwrap();
-                }
-                println!("track {} of {} parsed", i, &s_box.trk_count);
-                track.midi_evs.iter().collect()
-            }).collect());
-        };*/
+        s.tempo_evs = merge_tempo_evs(tempo_evs_seq);
 
         Ok(s)
     }
 
     // move from self to Vec<MIDIEvent>
-    pub fn get_evs_and_notes(self) -> (Vec<MIDIEvent>, Vec<Vec<Note>>) {
+    pub fn get_sequences(self,
+        midi_evs: &mut Vec<MIDIEvent>,
+        notes_out: &mut Vec<Vec<Note>>
+        ) -> () {
         println!("----- Getting events (Parse pass 2) -----");
         let (evs, mut notes): (Vec<Vec<MIDIEvent>>, Vec<Vec<Vec<Note>>>) = self.tracks.into_par_iter().enumerate().map(|(i, mut track)| {
             while !track.ended {
@@ -98,16 +85,14 @@ impl MIDIFile {
              track.notes)
 
         }).collect();
+        println!("merging events...");
         let mut merged_notes_at_keys: Vec<Vec<Note>> = Vec::new();
-        for _ in 0..128 {
+        for _ in 0..256 {
             merged_notes_at_keys.push(
                 merge_notes(notes.iter_mut().map(|n| n.pop().unwrap()).collect::<Vec<_>>())
             );
         }
-        println!("{}", merged_notes_at_keys[0].len());
-        println!("merging events...");
-        (merge_midi_events(evs),
-         merged_notes_at_keys)
+        (*midi_evs, *notes_out) = (merge_midi_events(evs), merged_notes_at_keys);
     }
 
     fn parse_header(&mut self, stream: &mut File) -> Result<(),&str> {

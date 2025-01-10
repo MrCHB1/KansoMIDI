@@ -20,7 +20,12 @@ void main() {
     float start = note_times.x * 2.0 - 1.0;
     float end = note_times.y * 2.0 - 1.0;
     uint clr = colors;
-    vec3 color = vec3(uvec3((clr & uint(0xFF)), (clr >> 8) & uint(0xFF), (clr >> 16) & uint(0xFF))) / 256.0;
+    vec3 color = vec3(
+        uvec3((clr & uint(0xFF)),
+              (clr >> 8) & uint(0xFF),
+              (clr >> 16) & uint(0xFF)
+        )
+    ) / 256.0;
     vec3 bdr = color * 0.3;
     v_texcoord = texcoord;
     note_size = vec2(abs((right * 0.5 + 0.5) - (left * 0.5 + 0.5)), abs((end * 0.5 + 0.5) - (start * 0.5 + 0.5)));

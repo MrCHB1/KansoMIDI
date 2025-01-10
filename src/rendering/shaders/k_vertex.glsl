@@ -1,6 +1,6 @@
 #version 330
 
-layout (location = 0) in vec2 texcoord;
+//layout (location = 0) in vec2 texcoord;
 //layout (location = 1) in uint color;
 //layout (location = 2) in uint meta;
 
@@ -31,15 +31,18 @@ void main() {
 
     k_pressed = pressed ? 1.0 : 0.0;
     k_black = black ? 1.0 : 0.0;
-    v_texcoord = texcoord;
 
     if (int(gl_VertexID % 4) == 0) {
+        v_texcoord = vec2(0.0, 0.0);
         gl_Position = vec4(left, -1.0, 0.0, 1.0);
     } else if (int(gl_VertexID % 4) == 1) {
+        v_texcoord = vec2(1.0, 0.0);
         gl_Position = vec4(right, -1.0, 0.0, 1.0);
     } else if (int(gl_VertexID % 4) == 2) {
+        v_texcoord = vec2(1.0, 1.0);
         gl_Position = vec4(right, keyboard_height * 2.0 - 1.0, 0.0, 1.0);
     } else {
+        v_texcoord = vec2(0.0, 1.0);
         gl_Position = vec4(left, keyboard_height * 2.0 - 1.0, 0.0, 1.0);
     }
 

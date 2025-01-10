@@ -10,12 +10,24 @@ pub struct TempoEvent {
     pub tempo: u32
 }
 
+pub enum MetaEventName {
+    Marker=0x06,
+    TimeSignature=0x58,
+    KeySignature=0x59
+}
+
+pub struct MetaEvent {
+    pub time: f32,
+    pub meta_name: MetaEventName,
+    pub data: Vec<u8>
+}
+
 //#[derive(PartialEq, Eq)]
 pub enum MIDIEventType {
     NoteOff=0x80,
     NoteOn=0x90,
     ControlEvent=0xB0,
-    PitchWheel=0xE0,
+    PitchBend=0xE0,
 }
 
 //#[derive(PartialEq, Eq)]
@@ -32,10 +44,11 @@ struct UnendedNote {
 
 #[derive(PartialEq, Eq, Clone)]
 pub struct Note {
-    pub start: u64,
-    pub end: u64,
+    pub start: u32,
+    pub end: u32,
     pub channel: u8,
     pub track: usize,
+    pub velocity: u8,
 }
 
 pub struct MIDITrack {
@@ -48,8 +61,9 @@ pub struct MIDITrack {
 
     pub tempo_evs: Vec<TempoEvent>,
     pub midi_evs: Vec<MIDIEvent>,
+    pub meta_evs: Vec<MetaEvent>,
     pub notes: Vec<Vec<Note>>,
-    note_counts: [usize; 128],
+    note_counts: [usize; 256],
     pub track_len: u64,
     pub track_len_p2: f64,
     pub t_track_time: f64,
@@ -58,7 +72,7 @@ pub struct MIDITrack {
 
     unended_notes: Vec<Vec<UnendedNote>>,
     unended_init: bool,
-    curr_note_idx: [usize; 128],
+    curr_note_idx: [usize; 256],
 
     valid_delta: f64, // to add delta times of skipped / unneeded events lol
     ppq: u16,
@@ -77,8 +91,9 @@ impl MIDITrack {
 
             tempo_evs: Vec::new(),
             midi_evs: Vec::new(),
+            meta_evs: Vec::new(),
             notes: Vec::new(),
-            note_counts: [0usize; 128],
+            note_counts: [0usize; 256],
             track_len: 0,
             track_len_p2: 0.0f64,
             t_track_time: 0.0f64,
@@ -87,7 +102,7 @@ impl MIDITrack {
 
             unended_notes: Vec::new(),
             unended_init: false,
-            curr_note_idx: [0usize; 128],
+            curr_note_idx: [0usize; 256],
 
             valid_delta: 0.0f64,
             ppq,
@@ -147,10 +162,7 @@ impl MIDITrack {
 
         self.prev_cmd = command;
 
-        let c: u8 = command & 0xF0;
-        //let ch: u8 = command & 0x0F;
-
-        match c {
+        match command & 0xF0 {
             0x80 => {
                 self.rdr.skip_bytes(2)?;
             },
@@ -235,7 +247,7 @@ impl MIDITrack {
         self.prev_cmd = 0x00;
         self.ended = false;
 
-        for _ in 0..128 {
+        for _ in 0..256 {
             self.notes.push(Vec::new());
         }
 
@@ -248,7 +260,7 @@ impl MIDITrack {
         }
 
         if !self.unended_init {
-            for _ in 0..128*16 {
+            for _ in 0..256*16 {
                 self.unended_notes.push(Vec::new());
             }
             self.unended_init = true;
@@ -271,7 +283,18 @@ impl MIDITrack {
             0x80 => {
                 //self.rdr.skip_bytes(2)?;
                 let key = self.rdr.read_byte()?;
-                let vel = self.rdr.read_byte()?;
+                let mut vel = self.rdr.read_byte()?;
+
+                let un = &mut self.unended_notes[key as usize * 16 + ch as usize];
+                if un.len() != 0 {
+                    let n = un.pop().unwrap();
+                    if n.id != -1 {
+                        self.notes[key as usize][n.id as usize].end = (self.t_track_time * 1000000.0) as u32;
+                        self.notes[key as usize][n.id as usize].velocity = n.vel;
+                        vel = n.vel;
+                    }
+                }
+
                 self.midi_evs.push(
                     MIDIEvent {
                         time: self.t_track_time as f32,
@@ -279,13 +302,6 @@ impl MIDITrack {
                         data: vec![ch, key, vel]
                     }
                 );
-                let un = &mut self.unended_notes[key as usize * 16 + ch as usize];
-                if un.len() != 0 {
-                    let n = un.pop().unwrap();
-                    if n.id != -1 {
-                        self.notes[key as usize][n.id as usize].end = (self.t_track_time * 1000000.0) as u64;
-                    }
-                }
                 self.valid_delta = 0.0;
             },
             0x90 => {
@@ -304,7 +320,9 @@ impl MIDITrack {
                     if un.len() != 0 {
                         let n = un.pop().unwrap();
                         if n.id != -1 {
-                            self.notes[key as usize][n.id as usize].end = (self.t_track_time * 1000000.0) as u64;
+                            self.notes[key as usize][n.id as usize].end = (self.t_track_time * 1000000.0) as u32;
+                            self.notes[key as usize][n.id as usize].velocity = n.vel;
+                            
                         }
                     }
                 } else {
@@ -320,10 +338,11 @@ impl MIDITrack {
                     //self.notes[key as usize][self.curr_note_idx[key as usize]].start = (self.t_track_time * 1000000.0) as u64;
                     //self.notes[key as usize][self.curr_note_idx[key as usize]].channel = ch;
                     self.notes[key as usize].push(Note {
-                        start: (self.t_track_time * 1000000.0) as u64,
-                        end: 1000000000000,
+                        start: (self.t_track_time * 1000000.0) as u32,
+                        end: 10000000,
                         channel: ch,
-                        track: self.track_num
+                        track: self.track_num,
+                        velocity: 0
                     });
                     self.curr_note_idx[key as usize] += 1;
                 }
@@ -346,7 +365,7 @@ impl MIDITrack {
                 let v2 = self.rdr.read_byte()?;
                 self.midi_evs.push(MIDIEvent {
                     time: self.t_track_time as f32,
-                    command: MIDIEventType::PitchWheel,
+                    command: MIDIEventType::PitchBend,
                     data: vec![ch, v1, v2]
                 });
                 
@@ -366,7 +385,17 @@ impl MIDITrack {
                         
                         match cmd2 {
                             0x00 => { self.rdr.skip_bytes(2)?; }
-                            0x01..=0x07 | 0x0A => {
+                            // marker
+                            0x06 => {
+                                let mut text_bytes: Vec<u8> = vec![0u8; val];
+                                self.rdr.read(&mut text_bytes[0..val], val).unwrap();
+                                self.meta_evs.push(MetaEvent {
+                                    time: self.t_track_time as f32,
+                                    meta_name: MetaEventName::Marker,
+                                    data: text_bytes
+                                });
+                            }
+                            0x01..=0x05 | 0x07 | 0x0A => {
                                 self.rdr.skip_bytes(val)?;
                             }
                             0x7F => { self.rdr.skip_bytes(val)?; }
