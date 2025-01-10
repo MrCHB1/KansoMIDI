@@ -10,3 +10,5 @@ Definitely not the fastest MIDI player to date, but this was made in an attempt 
 4. Run `cargo run --release`.
 
 Alternatively, Windows users can download the executable from the releases page.
+
+
