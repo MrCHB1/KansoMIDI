@@ -21,11 +21,13 @@ pub struct MIDIFile {
     pub tracks: Vec<MIDITrack>,
     pub note_counts: Vec<u64>,
 
+    pub key_range: [u8; 2],
+
     tempo_evs: Vec<TempoEvent>
 }
 
 impl MIDIFile {
-    pub fn new(path: String) -> Result<Self,()> {
+    pub fn new(path: String, tick_based_parsing: bool) -> Result<Self,()> {
         let file_stream = Arc::new(Mutex::new(
             File::open(path).unwrap()
         ));
@@ -37,10 +39,9 @@ impl MIDIFile {
             tracks: Vec::new(),
             note_counts: Vec::new(),
 
-            tempo_evs: Vec::new()
+            tempo_evs: Vec::new(),
+            key_range: [0, 127]
         };
-
-        let mut track_count: u16 = 0;
 
         {
             let mut fs = file_stream.lock().unwrap();
@@ -48,9 +49,9 @@ impl MIDIFile {
             s.populate_track_locations(&mut fs).unwrap();
         }
 
-        track_count = s.trk_count;
+        let track_count = s.trk_count;
         for i in 0usize..(track_count as usize) {
-            s.tracks.push(MIDITrack::new(i, s.ppq, Arc::clone(&file_stream), &s.track_locations[i]).unwrap());
+            s.tracks.push(MIDITrack::new(i, s.ppq, Arc::clone(&file_stream), &s.track_locations[i], tick_based_parsing).unwrap());
         }
 
         println!("----- Parse pass 1 -----");
@@ -65,6 +66,11 @@ impl MIDIFile {
             (track.note_count, std::mem::take(&mut track.tempo_evs))
         }).collect();
 
+        s.key_range = (
+            s.tracks.iter().map(|track| track.key_range[0]).min().unwrap(),
+            s.tracks.iter().map(|track| track.key_range[1]).max().unwrap()
+        ).into();
+
         s.tempo_evs = merge_tempo_evs(tempo_evs_seq);
 
         Ok(s)
@@ -73,26 +79,40 @@ impl MIDIFile {
     // move from self to Vec<MIDIEvent>
     pub fn get_sequences(self,
         midi_evs: &mut Vec<MIDIEvent>,
-        notes_out: &mut Vec<Vec<Note>>
+        notes_out: &mut Vec<Vec<Note>>,
+        tempo_evs: &mut Vec<TempoEvent>
         ) -> () {
         println!("----- Getting events (Parse pass 2) -----");
-        let (evs, mut notes): (Vec<Vec<MIDIEvent>>, Vec<Vec<Vec<Note>>>) = self.tracks.into_par_iter().enumerate().map(|(i, mut track)| {
+        let (evs, (mut notes, t_evs)): (Vec<Vec<MIDIEvent>>, (Vec<Vec<Vec<Note>>>, Vec<Vec<TempoEvent>>)) = self.tracks.into_par_iter().enumerate().map(|(i, mut track)| {
             while !track.ended {
                 track.parse_pass_two(&self.tempo_evs).unwrap();
             }
             println!("track {} of {} parsed", i, &self.trk_count);
             (track.midi_evs,
-             track.notes)
+             (track.notes,
+              track.tempo_evs))
 
         }).collect();
         println!("merging events...");
-        let mut merged_notes_at_keys: Vec<Vec<Note>> = Vec::new();
-        for _ in 0..256 {
-            merged_notes_at_keys.push(
-                merge_notes(notes.iter_mut().map(|n| n.pop().unwrap()).collect::<Vec<_>>())
-            );
-        }
-        (*midi_evs, *notes_out) = (merge_midi_events(evs), merged_notes_at_keys);
+        (*tempo_evs) = merge_tempo_evs(t_evs);
+        println!("merged tempo events");
+
+        let notes_per_key: Vec<Vec<Vec<Note>>> = (0..256).map(|_| notes.iter_mut().map(|n| n.pop().unwrap()).collect::<Vec<_>>()).collect::<Vec<_>>();
+
+        let merged_notes_at_keys = Arc::new(Mutex::new(vec![Vec::new(); 256]));
+        notes_per_key
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(i, notes_for_key)| {
+                let merged_notes = merge_notes(notes_for_key);
+                println!("key {} of {} merged", i, 256);
+                let mut notes_guard = merged_notes_at_keys.lock().unwrap();
+                notes_guard[i] = merged_notes;
+            });
+
+        (*midi_evs, *notes_out) = 
+            (merge_midi_events(evs),
+            Arc::try_unwrap(merged_notes_at_keys).unwrap().into_inner().unwrap());
     }
 
     fn parse_header(&mut self, stream: &mut File) -> Result<(),&str> {

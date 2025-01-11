@@ -1,10 +1,10 @@
-use std::{error::Error, fmt, fs::File, io::BufReader, path::{absolute, PathBuf}, sync::atomic::{AtomicI32, Ordering}, time::{Duration, Instant}};
+use std::{path::absolute, sync::atomic::{AtomicI32, Ordering}, time::Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, Device, StreamConfig};
+use cpal::{BufferSize, StreamConfig};
 use gl;
 use glutin::{
-    dpi::{LogicalSize, PhysicalSize, Size},
+    dpi::LogicalSize,
     event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
     platform::run_return::EventLoopExtRunReturn,
     window::WindowBuilder,
@@ -14,12 +14,27 @@ use glutin::{
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use rand::seq::SliceRandom;
 use crate::{
-    audio::prerender_audio::PrerenderAudio, midi::{midi_file::MIDIFile, midi_track_parser::{MIDIEvent, Note}}, rendering::renderer::Renderer, settings::{advanced_settings::AdvancedSettings, audio_settings::AudioSettings, player_settings::PlayerSettings, visual_settings::VisualSettings}, util::{color_palettes::ColorPalettes, global_timer::GlobalTimer, misc::open_directory_in_explorer}, PlayerState
+    audio::prerender_audio::PrerenderAudio,
+    midi::{
+        midi_file::MIDIFile, 
+        midi_track_parser::{MIDIEvent, Note, TempoEvent}
+    }, 
+    rendering::renderer::Renderer, 
+    settings::{
+        advanced_settings::AdvancedSettings, 
+        audio_settings::AudioSettings, 
+        player_settings::PlayerSettings, 
+        visual_settings::VisualSettings
+    }, 
+    util::{
+        color_palettes::ColorPalettes, 
+        global_timer::GlobalTimer,
+        misc::open_directory_in_explorer
+    }
 };
 use std::sync::{Arc, Mutex};
-use imgui::{Context, InputTextFlags, Ui};
+use imgui::{Context, Ui};
 
-use image::{GenericImageView, ImageReader, Rgb};
 use rfd::FileDialog;
 
 pub struct MainWindow {
@@ -46,6 +61,8 @@ pub struct MainWindow {
     fps: Arc<AtomicI32>,
     sf_selected: i32,
     sf_loaded: bool,
+
+    midi_key_range: [u8; 2]
 }
 
 impl MainWindow {
@@ -68,7 +85,7 @@ impl MainWindow {
 
         let key_threads = advanced_settings.per_key_thread_count;
         let channel_threads = advanced_settings.per_chan_thread_count;
-        
+
         let mut win = Self {
             width,
             height,
@@ -97,11 +114,12 @@ impl MainWindow {
             time_nav_changed: false,
             fps: Arc::new(AtomicI32::new(0)),
             sf_selected: 0,
-            sf_loaded: false
+            sf_loaded: false,
+
+            midi_key_range: [0, 128]
         };
 
-        //win.prerenderer.xsynth_load_sfs(&["./test/Kryo Keys II (SF2).sf2"]);
-        //win.prerenderer.play();
+        // initialize the audio stream for prerender audio playback
         win.stream = Some(win.prerenderer.construct_stream());
 
         win.sync_settings();
@@ -125,10 +143,12 @@ impl MainWindow {
         );
         
         let mut event_loop = EventLoop::new();
+        // define the window
         let window = WindowBuilder::new()
             .with_title(self.title)
             .with_inner_size(ws);
 
+        // make OpenGL context with ver. 3.3
         let gl_context = ContextBuilder::new()
             .with_gl(glutin::GlRequest::Specific(glutin::Api::OpenGl, (3, 3)))
             .build_windowed(window, &event_loop)
@@ -140,8 +160,10 @@ impl MainWindow {
                 .expect("failed to make current context")
         };
 
+        // make gl recognize the context via a pointer
         gl::load_with(|ptr| gl_context.get_proc_address(ptr) as *const _);
         
+        // initialize the renderer
         let mut renderer: Renderer = unsafe { Renderer::new(self.width as f32, self.height as f32) };
         renderer.bar_color = self.visual_settings.bar_color;
         renderer.background_color = self.visual_settings.background_color;
@@ -150,42 +172,44 @@ impl MainWindow {
         );
 
         match self.visual_settings.keyboard_range_id {
+            // 88 key range
             0 => {
                 renderer.first_key = 21;
                 renderer.last_key = 108;
             },
+            // 128 keys
             1 => {
                 renderer.first_key = 0;
                 renderer.last_key = 127;
             },
+            // 256 keys
             2 => {
                 renderer.first_key = 0;
                 renderer.last_key = 255;
             },
+            // MIDI key range
             3 => {
                 renderer.first_key = 0;
                 renderer.last_key = 127;
             },
+            // custom key range
             4 => {
                 renderer.first_key = self.visual_settings.kb_first_key;
                 renderer.last_key = self.visual_settings.kb_last_key;
             },
+            // unknown
             _ => {
                 panic!("Unknown Keyboard Range: {}", self.visual_settings.keyboard_range_id)
             }
         }
-        
-        //renderer.set_notes(notes);
 
         // imgui
-
         let mut imgui = Context::create();
         let mut platform = WinitPlatform::init(&mut imgui);
         platform.attach_window(imgui.io_mut(), gl_context.window(), HiDpiMode::Default);
         imgui.fonts().build_alpha8_texture();
 
         let ui_renderer = imgui_opengl_renderer::Renderer::new(&mut imgui, |s| gl_context.get_proc_address(s) as _);
-        //let mut pause_time = Instant::now();
 
         let mut last_frame = Instant::now();
 
@@ -217,6 +241,7 @@ impl MainWindow {
                     event: WindowEvent::MouseInput { .. },
                     ..
                 } => {
+                    // imgui inputs
                     platform.handle_event(imgui.io_mut(), gl_context.window(), &event);
                 },
                 Event::WindowEvent { event, .. } => {
@@ -239,6 +264,7 @@ impl MainWindow {
                         WindowEvent::KeyboardInput { input: KeyboardInput {
                                 virtual_keycode,
                                 state,
+                                modifiers,
                                 ..
                             },
                             ..
@@ -275,6 +301,23 @@ impl MainWindow {
                                         (*g_time).navigate(cur_time);
                                         (a_self.lock().unwrap()).prerenderer.play_audio(g_time.get_time(), g_time.speed, false);
                                     }
+                                },
+                                Some(VirtualKeyCode::Return) => {
+                                    if *state == ElementState::Pressed && modifiers.alt() {
+                                        let mut a_s = a_self.lock().unwrap();
+                                        let window = gl_context.window();
+                                        if !a_s.player_settings.fullscreen {
+                                            window.set_fullscreen(Some(
+                                                glutin::window::Fullscreen::Borderless(None)
+                                            ));
+                                        } else {
+                                            window.set_fullscreen(None);
+                                        }
+                                        a_s.player_settings.fullscreen = !a_s.player_settings.fullscreen;
+                                        unsafe {
+                                            renderer.resize(window.inner_size().width as i32, window.inner_size().height as i32)
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }
@@ -291,49 +334,27 @@ impl MainWindow {
                 _event => {
                     unsafe {
                         let mut g_time = global_time.lock().unwrap();
-                        //renderer.time = st.elapsed().as_secs_f32();
-                        /*if *player_state == PlayerState::Paused {
-                            renderer.time = pause_time.duration_since(st).as_secs_f32() + start_time;
-                        } else {
-                            renderer.time = pause_time.duration_since(st).as_secs_f32() - st.elapsed().as_secs_f32() + start_time;
-                        }*/
 
-                        if (a_self.lock().unwrap()).midi_loaded && !(a_self.lock().unwrap()).stream_playing {
-                            (a_self.lock().unwrap()).stream.as_ref().unwrap().play().unwrap();
-                            (a_self.lock().unwrap()).prerenderer.play_audio(g_time.get_time(), g_time.speed, true);
-                            (a_self.lock().unwrap()).stream_playing = true;
+                        // lock self
+                        if a_self.lock().unwrap().midi_loaded && !(a_self.lock().unwrap()).stream_playing {
+                            a_self.lock().unwrap().stream.as_ref().unwrap().play().unwrap();
+                            a_self.lock().unwrap().prerenderer.play_audio(g_time.get_time(), g_time.speed, true);
+                            a_self.lock().unwrap().stream_playing = true;
                         }
-
-                        /*if !stream_started {
-                            let status = (a_self.lock().unwrap()).stream.play();
-                            (*g_time).play();
-                            match status {
-                                Ok(_) => {
-
-                                },
-                                Err(_) => {
-                                    *control_flow = ControlFlow::Exit;
-                                }
-                            }
-                            stream_started = true;
-                        }*/
                         
                         if render_time.elapsed().as_secs_f32() >= 1.0 / (a_self.lock().unwrap()).advanced_settings.max_fps as f32 {
-                            //render_extra_time = render_time_elapsed - 1.0 / (a_self.lock().unwrap()).advanced_settings.max_fps as f32;
                             frame_can_render = true;
                         }
-                        if !(a_self.lock().unwrap()).advanced_settings.limit_fps {
+                        if !a_self.lock().unwrap().advanced_settings.limit_fps {
                             frame_can_render = true;
                         }
 
                         if frame_can_render {
                             renderer.time = (*g_time).get_time();
                             renderer.draw(&gl_context);
-                            //platform.handle_event(imgui.ihttps://docs.rs/image/latest/image/index.htmlo_mut(), gl_context.window(), &event);
-                            //let draw_data = imgui.render();
 
                             let ui = imgui.frame();
-                            (a_self.lock().unwrap()).render_ui(&mut renderer, ui, &mut g_time, &mut force_pause);
+                            a_self.lock().unwrap().render_ui(&mut renderer, ui, &mut g_time, &mut force_pause);
                             platform.prepare_render(ui, &gl_context.window());
                             ui_renderer.render(&mut imgui);
                             
@@ -347,14 +368,13 @@ impl MainWindow {
                         // update every 1 second
                         let frame_elapsed = fps_start.elapsed().as_secs_f32();
                         if frame_elapsed > 1.0 {
-                            (a_self.lock().unwrap()).fps.store((num_frames as f32 / frame_elapsed) as i32, Ordering::SeqCst);
+                            a_self.lock().unwrap().fps.store((num_frames as f32 / frame_elapsed) as i32, Ordering::SeqCst);
                             num_frames = 0;
                             fps_start = Instant::now();
                         }
                     }
                 }
             }
-            //imgui_winit_support::handle_event(&mut imgui, event);
         });
     }
 
@@ -437,12 +457,15 @@ impl MainWindow {
             renderer.last_key = 255;
         }
         if ui.radio_button("MIDI's Key Range", &mut self.visual_settings.keyboard_range_id, 3) {
-
+            println!("{}", self.midi_key_range[0]);
+            renderer.first_key = self.midi_key_range[0] as usize;
+            renderer.last_key = self.midi_key_range[1] as usize;
         }
         if ui.radio_button("Custom", &mut self.visual_settings.keyboard_range_id, 4) {
             renderer.first_key = self.visual_settings.kb_first_key;
             renderer.last_key = self.visual_settings.kb_last_key;
         }
+        // disable if custom isn't selected
         ui.disabled(self.visual_settings.keyboard_range_id != 4, || {
             let mut first_key = self.visual_settings.kb_first_key as i32;
             let mut last_key = self.visual_settings.kb_last_key as i32;
@@ -495,7 +518,7 @@ impl MainWindow {
         }
     }
 
-    fn render_pref_audio_tab(&mut self, renderer: &mut Renderer, ui: &Ui) -> () {
+    fn render_pref_audio_tab(&mut self, renderer: &mut Renderer, ui: &Ui, g_time: &mut GlobalTimer) -> () {
         let mut lyr_count = self.audio_settings.layer_count;
         if self.input_int_with_hint(ui, "Layer Count", &mut lyr_count, "One layer equals 128 voices.") {
             self.audio_settings.layer_count = lyr_count;
@@ -517,8 +540,10 @@ impl MainWindow {
             }
         }
         if ui.button("-") {
-            self.audio_settings.soundfont_paths.remove(self.sf_selected as usize);
-            self.sf_loaded = false;
+            if self.audio_settings.soundfont_paths.len() > 0 {
+                self.audio_settings.soundfont_paths.remove(self.sf_selected as usize);
+                self.sf_loaded = false;
+            }
         }
         if ui.button("^") {
             if self.sf_selected > 0 {
@@ -539,10 +564,12 @@ impl MainWindow {
         let mut sf_list_str: Vec<_> = self.audio_settings.soundfont_paths.iter().map(String::as_str).collect();
         ui.list_box("Soundfonts", &mut self.sf_selected, 
             &mut sf_list_str, 15);
-        //let _ = ui.input_int("Layer Count", &mut lyr_count);
 
         if ui.button("Load Soundfonts") && !self.sf_loaded {
+            self.prerenderer.stop();
             self.prerenderer.xsynth_load_sfs(&self.audio_settings.soundfont_paths);
+            self.prerenderer.play_audio(g_time.get_time(), g_time.speed, true);
+
             self.sf_loaded = true;
         }
 
@@ -576,7 +603,6 @@ impl MainWindow {
             self.advanced_settings.limit_fps = limit_fps;
         }
         
-        //ui.checkbox("Limit FPS", &mut self.advanced_settings.limit_fps);
         ui.disabled(!self.advanced_settings.limit_fps, || {
             let mut max_fps = self.advanced_settings.max_fps as i32;
             if ui.input_int("Max FPS", &mut max_fps).build() {
@@ -586,11 +612,9 @@ impl MainWindow {
 
         ui.new_line();
         if self.input_int_with_hint(ui, "Per Key Thread Count <!>", &mut per_key_thread_count, "How many threads XSynth should use for each key while rendering audio.\nA value of zero means an automatic thread count.") {
-            //self.advanced_settings.per_key_thread_count = per_key_thread_count;
             self.advanced_settings.set_per_key_thread_count(per_key_thread_count);
         }
         if self.input_int_with_hint(ui, "Per Channel Thread Count <!>", &mut per_chan_thread_count, "How many threads XSynth should use for each MIDI channel while rendering audio.\nA value of zero means an automatic thread count.") {
-            //self.advanced_settings.per_chan_thread_count = per_chan_thread_count;
             self.advanced_settings.set_per_chan_thread_count(per_chan_thread_count);
         }
     }
@@ -601,35 +625,27 @@ impl MainWindow {
 
         let mut transpose = self.audio_settings.misc_transpose;
         if ui.input_int("Transpose *", &mut transpose).build() {
-            let mut restart_audio = false;
+            //let mut restart_audio = false;
             self.audio_settings.misc_transpose = if transpose < -12 {
                 -12
             } else if transpose > 12 {
                 12
             } else {
-                restart_audio = true;
+                //restart_audio = true;
                 transpose
             };
             renderer.notes_transpose = transpose;
             self.prerenderer.transpose = transpose;
             renderer.refresh_render_notes();
         }
+
+        ui.new_line();
+        ui.text("MIDI Loading");
+        ui.checkbox("Tick-based parsing", &mut self.player_settings.tick_based);
     }
 
     fn render_ui(&mut self, renderer: &mut Renderer, ui: &mut Ui, g_time: &mut GlobalTimer, force_pause: &mut bool) -> () {
         if self.player_settings.show_ui {
-            /*ui.window("midi_info").no_inputs().no_decoration()
-            .position([10.0, 25.0], imgui::Condition::Always)
-            .always_auto_resize(true)
-            .build(|| {
-                ui.text(format!("Time: {} / {}", self.format_time(renderer.time), self.format_time(self.midi_length)));
-                ui.text(format!("Notes: {} / {}", renderer.notes_passed, renderer.note_count));
-                ui.text(format!("Polyphony: {}", renderer.polyphony));
-                ui.text(format!("FPS: {}", self.fps.load(Ordering::Relaxed)));
-                ui.text(format!("Buffer Length: {}", 
-                    self.format_time(self.prerenderer.get_buffer_seconds())
-                ));
-            });*/
             self.render_stats_ui(renderer, ui);
             //self.render_meta_stats_ui(renderer, ui);
         }
@@ -695,7 +711,7 @@ impl MainWindow {
 
                     // audio tab
                     if let Some(aud) = ui.tab_item("Audio") {
-                        self.render_pref_audio_tab(renderer, ui);
+                        self.render_pref_audio_tab(renderer, ui, g_time);
                         aud.end();
                     }
 
@@ -752,12 +768,21 @@ impl MainWindow {
                 self.unload_midi(renderer, g_time, force_pause);
             }
 
-            let mid: MIDIFile = MIDIFile::new(String::from(path.to_str().unwrap())).unwrap();
-            //let (mut evs, notes): (Vec<MIDIEvent>, Vec<Vec<Note>>) = mid.get_evs_and_notes();
+            let mid: MIDIFile = MIDIFile::new(String::from(path.to_str().unwrap()), self.player_settings.tick_based).unwrap();
+            renderer.ppq = mid.ppq;
+            self.midi_key_range = mid.key_range;
+
+            renderer.first_key = mid.key_range[0] as usize;
+            renderer.last_key = mid.key_range[1] as usize;
+            renderer.note_count = mid.note_counts.iter().sum::<u64>() as usize;
+            
             let mut evs: Vec<MIDIEvent> = Vec::new();
             let mut notes: Vec<Vec<Note>> = Vec::new();
-            mid.get_sequences(&mut evs, &mut notes);
+            let mut tempos: Vec<TempoEvent> = Vec::new();
+            mid.get_sequences(&mut evs, &mut notes, &mut tempos);
 
+            renderer.tick_based = self.player_settings.tick_based;
+            renderer.tempo_events = tempos;
             renderer.set_notes(notes);
             renderer.time = -3.0;
             g_time.play();
@@ -771,7 +796,14 @@ impl MainWindow {
 
     fn unload_midi(&mut self, renderer: &mut Renderer, g_time: &mut GlobalTimer, force_pause: &mut bool) {
         if self.midi_loaded == true {
+            self.midi_key_range = [0, 128];
+            renderer.first_key = 0;
+            renderer.last_key = 127;
+
             renderer.set_notes(Vec::new());
+            renderer.tempo_events.clear();
+            renderer.meta_events.clear();
+
             renderer.time = 0.0;
             //self.stream.pause().unwrap();
             self.prerenderer.reset_requested.store(true, Ordering::SeqCst);
@@ -786,42 +818,6 @@ impl MainWindow {
             println!("midi unloaded");
         } else {
             println!("cannot unload nothing!");
-        }
-    }
-
-    fn load_color_palette_from_image(&mut self) -> Result<Vec<u32>, &'static str> {
-        let file_diag = FileDialog::new()
-            .add_filter("Image File", &["png"])
-            .set_title("Open a Color Palette");
-        if let Some(path) = file_diag.pick_file() {
-            let f = std::fs::File::open(path).unwrap();
-            let image = ImageReader::new(
-                BufReader::new(
-                    f
-                ))
-                .with_guessed_format()
-                .unwrap();
-
-            let dec = image.decode().unwrap();
-
-            if dec.width() != 16 {
-                return Err("Image width isn't 16, silly!");
-            }
-
-            let mut colors: Vec<u32> = Vec::new();
-            for chan in 0..16 {
-                for y in 0..dec.height() {
-                    let pix = dec.get_pixel(chan, y).0;
-                    let pix_u32 =
-                        (pix[0] as u32) | 
-                        ((pix[1] as u32) << 8) |
-                        ((pix[2] as u32) << 16);
-                    colors.push(pix_u32);
-                }
-            }
-            Ok(colors)
-        } else {
-            Err("File dialog closed")
         }
     }
 

@@ -16,10 +16,6 @@ impl Buffer {
         gl::BindBuffer(self.target, self.id);
     }
 
-    pub unsafe fn unbind(&self) {
-        gl::BindBuffer(self.target, 0);
-    }
-
     pub unsafe fn set_data<D>(&self, data: &[D], usage: GLuint) {
         self.bind();
         let (_, data_bytes, _) = data.align_to::<u8>();
@@ -56,10 +52,6 @@ impl VertexArray {
         gl::BindVertexArray(self.id);
     }
 
-    pub unsafe fn unbind(&self) {
-        gl::BindVertexArray(0);
-    }
-
     pub unsafe fn set_attribute<V: Sized>(
         &self,
         type_: u32,
@@ -68,14 +60,24 @@ impl VertexArray {
         offset: GLint
     ) {
         self.bind();
-        gl::VertexAttribPointer(
-            attrib_pos,
-            components,
-            type_,
-            gl::FALSE,
-            std::mem::size_of::<V>() as GLint,
-            offset as *const _
-        );
+        if type_ == gl::FLOAT {
+            gl::VertexAttribPointer(
+                attrib_pos,
+                components,
+                type_,
+                gl::FALSE,
+                std::mem::size_of::<V>() as GLint,
+                offset as *const _
+            );
+        } else {
+            gl::VertexAttribIPointer(
+                attrib_pos,
+                components,
+                type_,
+                std::mem::size_of::<V>() as GLint,
+                offset as *const _
+            );
+        }
         gl::EnableVertexAttribArray(attrib_pos);
     }
 }

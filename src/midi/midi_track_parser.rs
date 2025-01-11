@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use crate::midi::buffered_byte_reader::BufferedByteReader;
 use crate::midi::midi_file::TrackPointer;
 
-#[derive(PartialEq, Eq)]
 pub struct TempoEvent {
     pub time: u64, // absolute time
+    pub time_norm: f32,
     pub tempo: u32
 }
 
@@ -42,7 +42,7 @@ struct UnendedNote {
     pub vel: u8
 }
 
-#[derive(PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Note {
     pub start: u32,
     pub end: u32,
@@ -76,11 +76,14 @@ pub struct MIDITrack {
 
     valid_delta: f64, // to add delta times of skipped / unneeded events lol
     ppq: u16,
-    track_num: usize
+    track_num: usize,
+
+    tick_based_parsing: bool,
+    pub key_range: [u8; 2]
 }
 
 impl MIDITrack {
-    pub fn new(t_num: usize, ppq: u16, stream: Arc<Mutex<File>>, loc: &TrackPointer) -> Result<Self, ()> {
+    pub fn new(t_num: usize, ppq: u16, stream: Arc<Mutex<File>>, loc: &TrackPointer, tick_based_parsing: bool) -> Result<Self, ()> {
         let mt = Self {
             rdr: BufferedByteReader::new(stream, loc.start as usize, loc.len as usize, 100000).unwrap(),
             ev_count: 0,
@@ -106,7 +109,10 @@ impl MIDITrack {
 
             valid_delta: 0.0f64,
             ppq,
-            track_num: t_num
+            track_num: t_num,
+
+            tick_based_parsing,
+            key_range: [255, 0]
         };
         Ok(mt)
     }
@@ -168,6 +174,13 @@ impl MIDITrack {
             },
             0x90 => {
                 let key = self.rdr.read_byte()?;
+                if key <= self.key_range[0] {
+                    self.key_range[0] = key;
+                }
+                if key >= self.key_range[1] {
+                    self.key_range[1] = key;
+                }
+
                 if self.rdr.read_byte()? > 0 { 
                     self.note_count += 1;
                     self.note_counts[key as usize] += 1;
@@ -203,6 +216,7 @@ impl MIDITrack {
                                 self.tempo_evs.push(
                                     TempoEvent {
                                         time: self.track_len,
+                                        time_norm: 0.0,
                                         tempo
                                     }
                                 );
@@ -289,7 +303,11 @@ impl MIDITrack {
                 if un.len() != 0 {
                     let n = un.pop().unwrap();
                     if n.id != -1 {
-                        self.notes[key as usize][n.id as usize].end = (self.t_track_time * 1000000.0) as u32;
+                        self.notes[key as usize][n.id as usize].end = if self.tick_based_parsing {
+                            self.track_len_p2 as u32
+                        } else {
+                            (self.t_track_time * 1000000.0) as u32
+                        };
                         self.notes[key as usize][n.id as usize].velocity = n.vel;
                         vel = n.vel;
                     }
@@ -320,7 +338,11 @@ impl MIDITrack {
                     if un.len() != 0 {
                         let n = un.pop().unwrap();
                         if n.id != -1 {
-                            self.notes[key as usize][n.id as usize].end = (self.t_track_time * 1000000.0) as u32;
+                            self.notes[key as usize][n.id as usize].end = if self.tick_based_parsing {
+                                self.track_len_p2 as u32
+                            } else {
+                                (self.t_track_time * 1000000.0) as u32
+                            };
                             self.notes[key as usize][n.id as usize].velocity = n.vel;
                             
                         }
@@ -338,7 +360,11 @@ impl MIDITrack {
                     //self.notes[key as usize][self.curr_note_idx[key as usize]].start = (self.t_track_time * 1000000.0) as u64;
                     //self.notes[key as usize][self.curr_note_idx[key as usize]].channel = ch;
                     self.notes[key as usize].push(Note {
-                        start: (self.t_track_time * 1000000.0) as u32,
+                        start: if self.tick_based_parsing {
+                            self.track_len_p2 as u32
+                        } else {
+                            (self.t_track_time * 1000000.0) as u32
+                        },
                         end: 10000000,
                         channel: ch,
                         track: self.track_num,
@@ -407,6 +433,12 @@ impl MIDITrack {
                                 for _ in 0..3 {
                                     tempo = (tempo << 8) | (self.rdr.read_byte()? as u32);
                                 }
+
+                                self.tempo_evs.push(TempoEvent {
+                                    time: self.track_len_p2 as u64,
+                                    time_norm: self.t_track_time as f32,
+                                    tempo
+                                });
                             }
                             0x54 => { self.rdr.skip_bytes(5)?; }
                             0x58 => { self.rdr.skip_bytes(4)?; }

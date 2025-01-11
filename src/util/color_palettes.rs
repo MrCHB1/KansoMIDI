@@ -32,7 +32,7 @@ impl ColorPalettes {
         };
 
         if !has_palettes {
-            col_palette.create_default_palettes();
+            col_palette.create_default_palettes().unwrap();
         }
 
         col_palette.populate_palette_paths();

@@ -189,7 +189,7 @@ impl PrerenderAudio {
                 },
             ))),
 
-            limiter: Arc::new(Mutex::new(Limiter::new(0.01, 0.1, sr as f32))),
+            limiter: Arc::new(Mutex::new(Limiter::new(0.01, 1.0, sr as f32))),
             generator_thread: None,
             start_time: 0.0f32,
 
@@ -294,7 +294,7 @@ impl PrerenderAudio {
                     diff as u8
                 };
 
-                let mut write_wrapped = |xsynth: &mut ChannelGroup, start: usize, count: usize| {
+                let write_wrapped = |xsynth: &mut ChannelGroup, start: usize, count: usize| {
                     let start = (start * 2) % buff_len;
                     let mut count = count * 2;
                     if start + count > buff_len {
@@ -323,7 +323,7 @@ impl PrerenderAudio {
                 //let needs_reset = reset_requested.lock().unwrap();
                 //let mut write = 0;
 
-                for e in (midi_evs.lock().unwrap()).iter() {
+                for e in &(midi_evs.lock().unwrap())[..] {
                     if match e.command {
                         MIDIEventType::NoteOn | MIDIEventType::NoteOff => true,
                         _ => false
@@ -373,7 +373,7 @@ impl PrerenderAudio {
                                 }
                                 if samples == 0 { break; }
                             }
-                            //std::thread::sleep(std::time::Duration::from_millis(2));
+                            std::thread::sleep(std::time::Duration::from_millis(2));
                             if reset_requested.load(Ordering::Relaxed) {
                                 break;
                             }
@@ -455,9 +455,6 @@ impl PrerenderAudio {
                                 )
                             ));
                         }
-                        _ => {
-
-                        }
                     }
 
                     if reset_requested.load(Ordering::Relaxed) {
@@ -491,11 +488,11 @@ impl PrerenderAudio {
                         ChannelAudioEvent::AllNotesKilled
                     )
                 ));
-                /*(*xsynth).send_event(SynthEvent::AllChannels(
+                (*xsynth).send_event(SynthEvent::AllChannels(
                     ChannelEvent::Audio(
                         ChannelAudioEvent::ResetControl
                     )
-                ));*/
+                ));
             }
         })
     }

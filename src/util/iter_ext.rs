@@ -1,30 +1,4 @@
-use std::{cmp::Reverse, collections::BinaryHeap};
-
 use crate::midi::midi_track_parser::{MIDIEvent, Note, TempoEvent};
-
-impl PartialOrd for TempoEvent {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for TempoEvent {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.time.cmp(&other.time)
-    }
-}
-
-/*impl PartialOrd for MIDIEvent {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for MIDIEvent {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.time.cmp(&other.time)
-    }
-}*/
 
 pub fn merge_two_tempo_seqs(seq1: Vec<TempoEvent>, seq2: Vec<TempoEvent>) -> Vec<TempoEvent> {
     let mut enum1 = seq1.into_iter();
@@ -53,7 +27,7 @@ pub fn merge_two_tempo_seqs(seq1: Vec<TempoEvent>, seq2: Vec<TempoEvent>) -> Vec
                 }
             },
             None => {
-                if e2 == None { break; }
+                if e2.is_none() { break; }
                 else {
                     res.push(e2.unwrap());
                     e2 = enum2.next();
